@@ -5,23 +5,85 @@ export const maxDuration = 300; // 5 minutes timeout for long responses
 
 export async function POST(request: NextRequest) {
   try {
-    const { message } = await request.json();
+    const { messages } = await request.json();
 
-    if (!message || typeof message !== 'string') {
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return NextResponse.json(
-        { error: 'Message is required' },
+        { error: 'Messages array is required' },
         { status: 400 }
       );
     }
 
-    console.log(`[${new Date().toISOString()}] Received message: ${message}`);
+    console.log(`[${new Date().toISOString()}] Received ${messages.length} messages`);
 
-    // Run claude command and collect output
-    const output = await runClaudeCommand(message);
+    // Format the conversation history for Claude
+    const formattedPrompt = messages
+      .map((msg: { role: string; content: string }) => {
+        const roleLabel = msg.role === 'user' ? 'User' : 'Assistant';
+        return `${roleLabel}: ${msg.content}`;
+      })
+      .join('\n\n');
 
-    console.log(`[${new Date().toISOString()}] Sending response: ${output.length} chars`);
+    console.log(`[${new Date().toISOString()}] Formatted prompt:\n${formattedPrompt}`);
 
-    return NextResponse.json({ response: output });
+    // Create a streaming response
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        const workingDir = process.env.CLAUDE_WORKING_DIR || process.cwd();
+
+        console.log(`[${new Date().toISOString()}] Spawning claude in ${workingDir}`);
+
+        const claude = spawn('claude', ['-p', formattedPrompt], {
+          cwd: workingDir,
+          env: process.env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+
+        // Close stdin immediately
+        if (claude.stdin) {
+          claude.stdin.end();
+        }
+
+        let stderr = '';
+
+        // Stream stdout data as it comes
+        claude.stdout.on('data', (data) => {
+          const text = data.toString();
+          console.log(`[${new Date().toISOString()}] streaming chunk: ${text.length} chars`);
+          controller.enqueue(encoder.encode(text));
+        });
+
+        claude.stderr.on('data', (data) => {
+          const text = data.toString();
+          stderr += text;
+          console.log(`[${new Date().toISOString()}] stderr: ${text.substring(0, 200)}`);
+        });
+
+        claude.on('close', (code) => {
+          console.log(`[${new Date().toISOString()}] Process exited with code ${code}`);
+
+          if (code !== 0 && code !== null) {
+            controller.enqueue(encoder.encode(`\n\nError: Claude exited with code ${code}`));
+          }
+
+          controller.close();
+        });
+
+        claude.on('error', (error) => {
+          console.error(`[${new Date().toISOString()}] Spawn error:`, error);
+          controller.enqueue(encoder.encode(`\n\nError: ${error.message}`));
+          controller.close();
+        });
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Transfer-Encoding': 'chunked',
+      },
+    });
   } catch (error) {
     console.error('Error:', error);
     return NextResponse.json(
@@ -29,88 +91,4 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
-}
-
-function runClaudeCommand(message: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const workingDir = process.env.CLAUDE_WORKING_DIR || process.cwd();
-
-    console.log(`[${new Date().toISOString()}] Spawning claude in ${workingDir}`);
-    console.log(`[${new Date().toISOString()}] Message: ${message}`);
-
-    const claude = spawn('claude', ['-p', message], {
-      cwd: workingDir,
-      env: process.env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    // Close stdin immediately - we're not sending any input
-    if (claude.stdin) {
-      claude.stdin.end();
-    }
-
-    let stdout = '';
-    let stderr = '';
-    let resolved = false;
-
-    // Set a timeout of 5 minutes
-    const timeout = setTimeout(() => {
-      if (!resolved) {
-        console.error(`[${new Date().toISOString()}] Timeout - killing process`);
-        claude.kill('SIGTERM');
-        reject(new Error('Claude command timed out after 5 minutes'));
-        resolved = true;
-      }
-    }, 5 * 60 * 1000);
-
-    claude.stdout.on('data', (data) => {
-      const text = data.toString();
-      stdout += text;
-      console.log(`[${new Date().toISOString()}] stdout chunk: ${text.length} chars`);
-    });
-
-    claude.stderr.on('data', (data) => {
-      const text = data.toString();
-      stderr += text;
-      console.log(`[${new Date().toISOString()}] stderr: ${text.substring(0, 200)}`);
-    });
-
-    claude.on('close', (code) => {
-      clearTimeout(timeout);
-      if (resolved) return;
-      resolved = true;
-
-      console.log(`[${new Date().toISOString()}] Process exited with code ${code}`);
-      console.log(`[${new Date().toISOString()}] Total stdout: ${stdout.length} chars`);
-      console.log(`[${new Date().toISOString()}] Total stderr: ${stderr.length} chars`);
-
-      if (code !== 0 && code !== null) {
-        reject(new Error(`Claude exited with code ${code}: ${stderr || 'No error output'}`));
-        return;
-      }
-
-      if (!stdout.trim()) {
-        reject(new Error('No output from Claude'));
-        return;
-      }
-
-      // Clean up the output
-      const cleaned = stdout
-        // Remove system-reminder tags
-        .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-        .trim();
-
-      console.log(`[${new Date().toISOString()}] Sending ${cleaned.length} chars to client`);
-      resolve(cleaned);
-    });
-
-    claude.on('error', (error) => {
-      clearTimeout(timeout);
-      if (resolved) return;
-      resolved = true;
-
-      console.error(`[${new Date().toISOString()}] Spawn error:`, error);
-      reject(new Error(`Failed to start Claude: ${error.message}`));
-    });
-  });
 }

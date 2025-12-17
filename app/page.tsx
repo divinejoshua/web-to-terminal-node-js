@@ -50,22 +50,74 @@ export default function ChatView() {
     setInput("");
     setIsLoading(true);
 
+    // Create an assistant message that we'll update as chunks arrive
+    const assistantMessageId = Math.random().toString(36).substr(2, 9);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: assistantMessageId,
+        role: "assistant",
+        content: "",
+        timestamp: new Date(),
+      },
+    ]);
+
     try {
+      // Build the full conversation history (excluding system messages)
+      const conversationHistory = messages
+        .filter(msg => msg.role !== "system")
+        .map(msg => ({
+          role: msg.role,
+          content: msg.content
+        }));
+
+      // Add the new user message to the history
+      conversationHistory.push({
+        role: "user",
+        content: userMessage
+      });
+
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ message: userMessage }),
+        body: JSON.stringify({ messages: conversationHistory }),
       });
 
-      const data = await response.json();
-
       if (!response.ok) {
-        throw new Error(data.error || "Failed to get response");
+        throw new Error("Failed to get response");
       }
 
-      addMessage("assistant", data.response);
+      // Read the streaming response
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (!reader) {
+        throw new Error("No reader available");
+      }
+
+      let accumulatedContent = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) {
+          break;
+        }
+
+        const chunk = decoder.decode(value, { stream: true });
+        accumulatedContent += chunk;
+
+        // Update the assistant message with the accumulated content
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMessageId
+              ? { ...msg, content: accumulatedContent }
+              : msg
+          )
+        );
+      }
     } catch (error) {
       console.error("Error:", error);
       addMessage(
