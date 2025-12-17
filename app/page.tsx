@@ -10,12 +10,17 @@ interface Message {
 }
 
 export default function ChatView() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: "welcome",
+      role: "system",
+      content: "Connected to Claude. How can I help you?",
+      timestamp: new Date(),
+    },
+  ]);
   const [input, setInput] = useState("");
-  const [status, setStatus] = useState<string>("Connecting...");
-  const [isTyping, setIsTyping] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const socketRef = useRef<WebSocket | null>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -24,44 +29,6 @@ export default function ChatView() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
-
-  useEffect(() => {
-    const socket = new WebSocket("ws://localhost:3000/api/terminal");
-    socketRef.current = socket;
-
-    socket.onopen = () => {
-      setStatus("Connected");
-      addMessage("system", "Connected to Claude. How can I help you?");
-    };
-
-    socket.onerror = () => {
-      setStatus("Connection error");
-      addMessage("system", "Connection error occurred.");
-    };
-
-    socket.onclose = () => {
-      setStatus("Disconnected");
-      addMessage("system", "Disconnected from Claude.");
-    };
-
-    socket.onmessage = (e) => {
-      const data = e.data;
-      // Filter out terminal control characters and prompts
-      const cleanData = data
-        .replace(/\x1b\[[0-9;]*m/g, "") // Remove ANSI color codes
-        .replace(/\x1b\[.*?[A-Za-z]/g, "") // Remove other ANSI sequences
-        .trim();
-
-      if (cleanData && cleanData.length > 0) {
-        setIsTyping(false);
-        addMessage("assistant", cleanData);
-      }
-    };
-
-    return () => {
-      socket.close();
-    };
-  }, []);
 
   const addMessage = (role: "user" | "assistant" | "system", content: string) => {
     setMessages((prev) => [
@@ -75,15 +42,39 @@ export default function ChatView() {
     ]);
   };
 
-  const sendMessage = () => {
-    if (!input.trim() || !socketRef.current) return;
+  const sendMessage = async () => {
+    if (!input.trim() || isLoading) return;
 
-    addMessage("user", input);
-    setIsTyping(true);
-
-    // Send to Claude CLI
-    socketRef.current.send(input + "\n");
+    const userMessage = input;
+    addMessage("user", userMessage);
     setInput("");
+    setIsLoading(true);
+
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ message: userMessage }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to get response");
+      }
+
+      addMessage("assistant", data.response);
+    } catch (error) {
+      console.error("Error:", error);
+      addMessage(
+        "system",
+        `Error: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -94,7 +85,7 @@ export default function ChatView() {
   };
 
   return (
-    <div className="h-screen w-full flex flex-col bg-gradient-to-b from-gray-50 to-gray-100">
+    <div className="h-screen w-full flex flex-col bg-gradient-to-b from-gray-50 to-gray-100 max-w-[800px] mx-auto">
       {/* Header */}
       <div className="bg-white border-b border-gray-200 px-6 py-4 shadow-sm">
         <div className="flex items-center justify-between">
@@ -104,13 +95,7 @@ export default function ChatView() {
             </div>
             <div>
               <h1 className="text-xl font-semibold text-gray-800">Claude</h1>
-              <span
-                className={`text-xs ${
-                  status === "Connected" ? "text-green-600" : "text-yellow-600"
-                }`}
-              >
-                {status}
-              </span>
+              <span className="text-xs text-green-600">Ready</span>
             </div>
           </div>
         </div>
@@ -121,26 +106,23 @@ export default function ChatView() {
         {messages.map((message) => (
           <div
             key={message.id}
-            className={`flex ${
-              message.role === "user" ? "justify-end" : "justify-start"
-            }`}
+            className={`flex ${message.role === "user" ? "justify-end" : "justify-start"
+              }`}
           >
             <div
-              className={`max-w-[70%] rounded-2xl px-4 py-3 ${
-                message.role === "user"
+              className={`max-w-[70%] rounded-2xl px-4 py-3 ${message.role === "user"
                   ? "bg-blue-500 text-white"
                   : message.role === "system"
-                  ? "bg-gray-300 text-gray-700 text-sm italic"
-                  : "bg-white text-gray-800 shadow-md border border-gray-200"
-              }`}
+                    ? "bg-gray-300 text-gray-700 text-sm italic"
+                    : "bg-white text-gray-800 shadow-md border border-gray-200"
+                }`}
             >
               <div className="whitespace-pre-wrap break-words">
                 {message.content}
               </div>
               <div
-                className={`text-xs mt-1 ${
-                  message.role === "user" ? "text-blue-100" : "text-gray-500"
-                }`}
+                className={`text-xs mt-1 ${message.role === "user" ? "text-blue-100" : "text-gray-500"
+                  }`}
               >
                 {message.timestamp.toLocaleTimeString([], {
                   hour: "2-digit",
@@ -150,7 +132,7 @@ export default function ChatView() {
             </div>
           </div>
         ))}
-        {isTyping && (
+        {isLoading && (
           <div className="flex justify-start">
             <div className="bg-white rounded-2xl px-4 py-3 shadow-md border border-gray-200">
               <div className="flex space-x-2">
